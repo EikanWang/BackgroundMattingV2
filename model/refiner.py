@@ -8,7 +8,7 @@ from typing import Tuple
 class Refiner(nn.Module):
     """
     Refiner refines the coarse output to full resolution.
-    
+
     Args:
         mode: area selection mode. Options:
             "full"         - No area selection, refine everywhere using regular Conv2d.
@@ -18,7 +18,7 @@ class Refiner(nn.Module):
         threshold: error threshold ranged from 0 ~ 1. Refine where err > threshold. Only used when mode == "thresholding".
         kernel_size: The convolution kernel_size. Options: [1, 3]
         prevent_oversampling: True for regular cases, False for speedtest.
-    
+
     Compatibility Args:
         patch_crop_method: the method for cropping patches. Options:
             "unfold"           - Best performance for PyTorch and TorchScript.
@@ -27,7 +27,7 @@ class Refiner(nn.Module):
         patch_replace_method: the method for replacing patches. Options:
             "scatter_nd"       - Best performance for PyTorch and TorchScript.
             "scatter_element"  - Another way for replacing patches.
-        
+
     Input:
         src: (B, 3, H, W) full resolution source image.
         bgr: (B, 3, H, W) full resolution background image.
@@ -35,16 +35,16 @@ class Refiner(nn.Module):
         fgr: (B, 3, Hc, Wc) coarse foreground residual prediction.
         err: (B, 1, Hc, Hc) coarse error prediction.
         hid: (B, 32, Hc, Hc) coarse hidden encoding.
-        
+
     Output:
         pha: (B, 1, H, W) full resolution alpha prediction.
         fgr: (B, 3, H, W) full resolution foreground residual prediction.
         ref: (B, 1, H/4, W/4) quarter resolution refinement selection map. 1 indicates refined 4x4 patch locations.
     """
-    
+
     # For TorchScript export optimization.
     __constants__ = ['kernel_size', 'patch_crop_method', 'patch_replace_method']
-    
+
     def __init__(self,
                  mode: str,
                  sample_pixels: int,
@@ -58,7 +58,7 @@ class Refiner(nn.Module):
         assert kernel_size in [1, 3]
         assert patch_crop_method in ['unfold', 'roi_align', 'gather']
         assert patch_replace_method in ['scatter_nd', 'scatter_element']
-        
+
         self.mode = mode
         self.sample_pixels = sample_pixels
         self.threshold = threshold
@@ -76,7 +76,7 @@ class Refiner(nn.Module):
         self.bn3 = nn.BatchNorm2d(channels[3])
         self.conv4 = nn.Conv2d(channels[3], channels[4], kernel_size, bias=True)
         self.relu = nn.ReLU(True)
-    
+
     def forward(self,
                 src: torch.Tensor,
                 bgr: torch.Tensor,
@@ -87,15 +87,15 @@ class Refiner(nn.Module):
         H_full, W_full = src.shape[2:]
         H_half, W_half = H_full // 2, W_full // 2
         H_quat, W_quat = H_full // 4, W_full // 4
-        
+
         src_bgr = torch.cat([src, bgr], dim=1)
-        
+
         if self.mode != 'full':
             err = F.interpolate(err, (H_quat, W_quat), mode='bilinear', align_corners=False)
             ref = self.select_refinement_regions(err)
             idx = torch.nonzero(ref.squeeze(1))
             idx = idx[:, 0], idx[:, 1], idx[:, 2]
-            
+
             if idx[0].size(0) > 0:
                 x = torch.cat([hid, pha, fgr], dim=1)
                 x = F.interpolate(x, (H_half, W_half), mode='bilinear', align_corners=False)
@@ -118,7 +118,7 @@ class Refiner(nn.Module):
                 x = self.bn3(x)
                 x = self.relu(x)
                 x = self.conv4(x)
-                
+
                 out = torch.cat([pha, fgr], dim=1)
                 out = F.interpolate(out, (H_full, W_full), mode='bilinear', align_corners=False)
                 out = self.replace_patch(out, x, idx)
@@ -141,25 +141,25 @@ class Refiner(nn.Module):
             x = self.conv2(x)
             x = self.bn2(x)
             x = self.relu(x)
-            
+
             if self.kernel_size == 3:
                 x = F.interpolate(x, (H_full + 4, W_full + 4))
                 y = F.pad(src_bgr, (2, 2, 2, 2))
             else:
                 x = F.interpolate(x, (H_full, W_full), mode='nearest')
                 y = src_bgr
-            
+
             x = self.conv3(torch.cat([x, y], dim=1))
             x = self.bn3(x)
             x = self.relu(x)
             x = self.conv4(x)
-            
+
             pha = x[:, :1]
             fgr = x[:, 1:]
             ref = torch.ones((src.size(0), 1, H_quat, W_quat), device=src.device, dtype=src.dtype)
-            
+
         return pha, fgr, ref
-    
+
     def select_refinement_regions(self, err: torch.Tensor):
         """
         Select refinement regions.
@@ -182,7 +182,7 @@ class Refiner(nn.Module):
             # Thresholding mode.
             ref = err.gt(self.threshold).float()
         return ref
-    
+
     def crop_patch(self,
                    x: torch.Tensor,
                    idx: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -190,7 +190,7 @@ class Refiner(nn.Module):
                    padding: int):
         """
         Crops selected patches from image given indices.
-        
+
         Inputs:
             x: image (B, C, H, W).
             idx: selection indices Tuple[(P,), (P,), (P,),], where the 3 values are (B, H, W) index.
@@ -201,7 +201,7 @@ class Refiner(nn.Module):
         """
         if padding != 0:
             x = F.pad(x, (padding,) * 4)
-        
+
         if self.patch_crop_method == 'unfold':
             # Use unfold. Best performance for PyTorch and TorchScript.
             return x.permute(0, 2, 3, 1) \
@@ -219,23 +219,23 @@ class Refiner(nn.Module):
             return torchvision.ops.roi_align(x, boxes, size + 2 * padding, sampling_ratio=1)
         else:
             # Use gather. Crops out patches pixel by pixel.
-            idx = self.compute_pixel_indices(x, idx, size, padding)
-            pat = torch.gather(x.view(-1), 0, idx.view(-1))
+            idx_ = self.compute_pixel_indices(x, idx, size, padding)
+            pat = torch.gather(x.view(-1), 0, idx_.view(-1))
             pat = pat.view(-1, x.size(1), size + 2 * padding, size + 2 * padding)
             return pat
-    
+
     def replace_patch(self,
                       x: torch.Tensor,
                       y: torch.Tensor,
                       idx: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
         """
         Replaces patches back into image given index.
-        
+
         Inputs:
             x: image (B, C, H, W)
             y: patches (P, C, h, w)
             idx: selection indices Tuple[(P,), (P,), (P,)] where the 3 values are (B, H, W) index.
-        
+
         Output:
             image: (B, C, H, W), where patches at idx locations are replaced with y.
         """
@@ -249,8 +249,8 @@ class Refiner(nn.Module):
             return x
         else:
             # Use scatter_element. Best compatibility for ONNX. Replacing pixel by pixel.
-            idx = self.compute_pixel_indices(x, idx, size=4, padding=0)
-            return x.view(-1).scatter_(0, idx.view(-1), y.view(-1)).view(x.shape)
+            idx_ = self.compute_pixel_indices(x, idx, size=4, padding=0)
+            return x.view(-1).scatter_(0, idx_.view(-1), y.view(-1)).view(x.shape)
 
     def compute_pixel_indices(self,
                               x: torch.Tensor,
